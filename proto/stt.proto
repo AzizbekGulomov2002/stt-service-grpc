@@ -1,0 +1,16 @@
+syntax = "proto3";
+
+package stt;
+
+service STTService {
+  rpc Transcribe (TranscribeRequest) returns (TranscribeResponse);
+}
+
+message TranscribeRequest {
+  bytes audio = 1;
+  string filename = 2;
+}
+
+message TranscribeResponse {
+  string text = 1;
+}
