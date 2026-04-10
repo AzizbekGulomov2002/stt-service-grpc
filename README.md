@@ -1,38 +1,38 @@
 # STT Service (Django + Celery + gRPC + Docker)
 
-Bu loyiha audio faylni qabul qilib, STT (Speech-To-Text) natijasini asinxron tarzda qaytaradi.  
-Asosiy o'zgarish: oldingi HTTP chain o'rniga gRPC qatlam qo'shildi va servis Docker orqali to'liq ko'tariladigan qilindi.
+This project accepts audio files and returns **text transcriptions (STT)** asynchronously. The main change is an added **gRPC layer** between Celery and your inference backend, and a **Docker-compose** setup to run the full stack locally or on a server.
 
-## Arxitektura
+## Architecture
 
-Data flow:
+End-to-end flow:
 
-1. Client audio faylni `POST /api/transcribe-from-url/` endpointiga yuboradi.
-2. Django API Celery task yaratadi.
-3. Celery worker gRPC client orqali `grpc-server:50051` ga so'rov yuboradi.
-4. gRPC server audio byte'larni oladi va tashqi inference endpointga yuboradi.
-5. Inference javobidagi `text` gRPC orqali workerga, worker orqali task result sifatida qaytadi.
-6. Client `GET /api/task-status/?task_id=...` orqali holatni oladi.
+1. The client uploads audio to `POST /api/transcribe-from-url/`.
+2. The Django API enqueues a **Celery** task.
+3. The Celery worker calls the **gRPC** server at `grpc-server:50051`.
+4. The gRPC server receives raw audio bytes and forwards them to your **HTTP inference endpoint** (multipart upload).
+5. The inference response’s `text` field is returned over gRPC to the worker and stored as the task result.
+6. The client polls `GET /api/task-status/?task_id=...` for status and result.
 
-## Nima uchun gRPC
+## Why gRPC
 
-- HTTP JSON/multipart qo'shimcha overheadini kamaytiradi.
-- Binary payload (`bytes`) transporti aniq va tez.
-- Service-to-service communication uchun low-latency.
-- Thread pool bilan parallel ishlashni yaxshiroq boshqaradi.
+- Less overhead than ad-hoc HTTP/JSON for internal service-to-service calls.
+- Clear binary transport for audio (`bytes` in protobuf).
+- Good fit for low-latency worker ↔ inference pipelines when combined with a robust backend.
 
-## Benchmark (taqqoslash)
+## Performance comparison (observed)
 
-Quyidagi natijalar amaliy ishlash kuzatuvi sifatida kiritildi:
+These numbers were recorded as **operational observations** on a 10-minute mono audio sample:
 
-- Eski holat (1x1, 10 minut audio): ~10 minut.
-- gRPC integratsiyadan keyin (shu 10 minut audio): ~9 soniya.
+| Setup | Approx. wall time |
+|--------|-------------------|
+| **Legacy path** (1×1, 10 min audio) | ~**10 minutes** |
+| **After gRPC integration** (same 10 min audio) | ~**9 seconds** |
 
-Izoh: natija infratuzilma, model backend, GPU holati va tarmoqga qarab farq qilishi mumkin. README'dagi bu raqamlar maqsadli taqqoslash uchun keltirilgan.
+**Note:** Actual latency depends on hardware (CPU/GPU), model, batching, network, and how the inference service is deployed. Treat the table above as a **before/after comparison** for your stack, not a universal guarantee.
 
-## Muhit o'zgaruvchilari (.env)
+## Environment variables (`.env`)
 
-`/.env` faylni gitga kiritmang. Repo ichida faqat `/.env.example` saqlanadi.
+Do **not** commit `.env`. Only `.env.example` is tracked in the repository.
 
 Minimal `.env`:
 
@@ -56,65 +56,64 @@ CORS_ALLOWED_ORIGINS=http://localhost:8000
 CSRF_TRUSTED_ORIGINS=http://localhost:8000
 ```
 
-## Local ishga tushirish (Docker)
+## Run with Docker
 
-1. `.env` yarating:
+1. Create `.env`:
 
 ```bash
 cp .env.example .env
 ```
 
-2. Kerakli qiymatlarni to'ldiring (`DJANGO_SECRET_KEY`, `INFERENCE_HTTP_ENDPOINT`, `MODEL_TOKEN`).
+2. Fill in required values (`DJANGO_SECRET_KEY`, `INFERENCE_HTTP_ENDPOINT`, `MODEL_TOKEN`, etc.).
 
-3. Build va run:
+3. Build and start:
 
 ```bash
 docker compose up --build
 ```
 
-Bu quyidagi containerlarni ko'taradi:
+Services:
 
-- `web` (Django API, `:8000`)
-- `worker` (Celery worker)
-- `grpc-server` (gRPC STT server, `:50051`)
-- `redis` (broker)
+- **web** — Django API on port `8000`
+- **worker** — Celery worker
+- **grpc-server** — gRPC STT service on port `50051`
+- **redis** — Celery broker
 
-## API endpointlar
+## HTTP API
 
-- `POST /api/transcribe-from-url/`  
-  Form-data: `file=<audio_file>`
+- **`POST /api/transcribe-from-url/`**  
+  Multipart form field: `file=<audio_file>`
 
-- `GET /api/task-status/?task_id=<id>`  
-  Task status va result olish uchun.
+- **`GET /api/task-status/?task_id=<id>`**  
+  Returns Celery state and result payload.
 
-- `GET /api/all-tasks-status/`  
-  Barcha tasklar holatini olish uchun.
+- **`GET /api/all-tasks-status/`**  
+  Lists stored task results (from the results backend).
 
-## gRPC servis
+## gRPC service
 
-Proto fayl: `proto/stt.proto`
+Proto: `proto/stt.proto`
 
-Service:
+- **Service:** `stt.STTService`
+- **RPC:** `Transcribe`
+  - **Request:** `bytes audio`, `string filename`
+  - **Response:** `string text`
 
-- `stt.STTService/Transcribe`
-  - Request: `bytes audio`, `string filename`
-  - Response: `string text`
+## Security notes
 
-## Xavfsizlik bo'yicha tavsiya
+- Keep `DJANGO_SECRET_KEY`, `MODEL_TOKEN`, and any API keys **only** in `.env` or a secrets manager.
+- Never commit `.env`.
+- Use `DEBUG=False` in production.
 
-- `DJANGO_SECRET_KEY`, `MODEL_TOKEN` va endpoint key/tokenlarni faqat `.env`da saqlang.
-- Hech qachon `.env`ni commit qilmang.
-- Productionda `DEBUG=False` bo'lishi shart.
+## Quick checks
 
-## Tez tekshirish
-
-Containerlar ishga tushgach:
+List containers:
 
 ```bash
 docker compose ps
 ```
 
-gRPC server health uchun log tekshirish:
+Follow gRPC server logs:
 
 ```bash
 docker compose logs -f grpc-server
